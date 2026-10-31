@@ -1,0 +1,11 @@
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = true
+runOnSave = false
+enableXsrfProtection = true
+
+[client]
+toolbarMode = "viewer"
+showErrorDetails = false

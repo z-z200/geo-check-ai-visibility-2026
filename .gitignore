@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+*.db
+data/runs/*
+!data/runs/.gitkeep
+data/last_profile.json
+logs/
+.streamlit/secrets.toml
