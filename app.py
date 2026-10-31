@@ -14,7 +14,10 @@ import streamlit as st
 from dotenv import dotenv_values, set_key, unset_key
 
 # 在依赖模块加载 .env 之前读取，确保只有本地启动脚本能开启网页写配置。
-PUBLIC_DEMO = os.getenv("GEO_PUBLIC_DEMO", "").strip() == "1"
+PUBLIC_BYOK = (
+    os.getenv("GEO_PUBLIC_BYOK", "").strip() == "1"
+    or os.getenv("GEO_PUBLIC_DEMO", "").strip() == "1"
+)
 _ENV_EDIT_ENABLED_AT_STARTUP = os.getenv("GEO_ALLOW_ENV_EDIT", "").strip() == "1"
 if "GEO_ALLOW_ENV_EDIT" not in os.environ:
     # 阻止 load_dotenv() 从 .env 中补入该开关，避免公开部署被配置文件误开启。
@@ -30,7 +33,7 @@ DEMO_PATH = Path("data/demo_results.json")
 RUN_DIR = Path("data/runs")
 LAST_PROFILE_PATH = Path("data/last_profile.json")
 ENV_PATH = Path(__file__).resolve().parent / ".env"
-ENV_EDIT_ENABLED = _ENV_EDIT_ENABLED_AT_STARTUP and not PUBLIC_DEMO
+ENV_EDIT_ENABLED = _ENV_EDIT_ENABLED_AT_STARTUP and not PUBLIC_BYOK
 API_ENV_KEYS = (
     "DEEPSEEK_API_KEY",
     "DOUBAO_API_KEY",
@@ -148,10 +151,12 @@ def mark_api_input_changed() -> None:
 
 
 def resolved_api_value(api_config: dict[str, str] | None, key: str) -> str:
-    """按页面配置、本机 .env、未配置的顺序解析单个字段。"""
+    """本地模式回退到 .env；公网 BYOK 模式只认可当前页面会话值。"""
     page_value = str((api_config or {}).get(key, "") or "").strip()
     if page_value:
         return page_value
+    if PUBLIC_BYOK:
+        return ""
     return os.getenv(key, "").strip()
 
 
@@ -164,6 +169,8 @@ def api_source_for(engine_name: str, api_config: dict[str, str] | None) -> str:
     )
     page_override = st.session_state.get(API_PAGE_OVERRIDE_KEY, False)
     page_values = [str((api_config or {}).get(key, "") or "").strip() for key in active_keys]
+    if PUBLIC_BYOK:
+        return "本次网页会话" if any(page_values) else "未配置"
     if page_override and any(page_values):
         return "网页配置"
     if any(os.getenv(key, "").strip() for key in active_keys):
@@ -264,7 +271,7 @@ def questions_for(profile: BrandProfile):
 
 def load_last_profile() -> None:
     """浏览器会话丢失时，自动恢复上一次保存的品牌档案。"""
-    if PUBLIC_DEMO:
+    if PUBLIC_BYOK:
         return
     if (
         st.session_state.get("skip_last_profile_restore")
@@ -291,7 +298,7 @@ def load_last_profile() -> None:
 
 def save_last_profile(profile: BrandProfile, covered_domains: list[str]) -> None:
     """保存最近档案；公网演示仅保留在当前浏览器会话中。"""
-    if PUBLIC_DEMO:
+    if PUBLIC_BYOK:
         return
     payload = {"profile": asdict(profile), "covered_domains": covered_domains}
     LAST_PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -310,7 +317,7 @@ def clear_profile_inputs() -> None:
     for key in (*profile_input_keys(version), *CURRENT_ANALYSIS_KEYS):
         st.session_state.pop(key, None)
     st.session_state["profile_form_version"] = version + 1
-    if not PUBLIC_DEMO:
+    if not PUBLIC_BYOK:
         try:
             LAST_PROFILE_PATH.unlink(missing_ok=True)
         except OSError as exc:
@@ -324,7 +331,7 @@ def run_path_for(profile: BrandProfile) -> Path:
     """同一会话内同一品牌复用记录；公网版写入随机会话临时文件。"""
     signature = json.dumps(asdict(profile), ensure_ascii=False, sort_keys=True)
     digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:12]
-    if PUBLIC_DEMO:
+    if PUBLIC_BYOK:
         session_id = st.session_state.setdefault("public_session_id", secrets.token_hex(12))
         path = Path(tempfile.gettempdir()) / "geo-check-public" / f"{session_id}-{digest}.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -427,6 +434,8 @@ def _status_value(api_config: dict[str, str] | None, key: str, validator) -> str
     page_value = str((api_config or {}).get(key, "") or "").strip()
     if validator(page_value):
         return page_value
+    if PUBLIC_BYOK:
+        return ""
     return os.getenv(key, "").strip()
 
 
@@ -450,85 +459,89 @@ def render_sidebar() -> tuple[str, bool, str, str]:
 
     with st.sidebar:
         st.header("运行设置")
-        if PUBLIC_DEMO:
+        if PUBLIC_BYOK:
             st.info(
-                "公网隐私保护版：仅使用模拟数据，不显示或保存 API Key；"
-                "品牌输入只保留在当前浏览器会话，不写入服务器文件。"
+                "公网 BYOK 模式：真实 API Key 只用于当前浏览器会话，不写入服务器 .env、"
+                "日志或报告；模拟和内置案例无需 Key。"
             )
-            mode = "mock"
-            offline = st.toggle(
-                "加载内置案例",
-                key="offline_demo",
-                help="直接读取随项目发布的演示数据，不访问网络。",
-            )
-            engine_name = "mock"
-            parse_choice = "规则解析"
-        else:
-            mode = st.radio("运行模式", ("mock", "live"), horizontal=True, key="run_mode")
-            offline = st.toggle("离线演示", key="offline_demo", help="直接读取内置案例，不调用任何 API")
-            engine_options = ("mock",) if mode == "mock" else ("deepseek", "doubao")
-            engine_name = st.selectbox("引擎", engine_options, key=f"engine_{mode}")
 
-            parse_choice = "规则解析"
-            if mode == "live" and not offline:
-                parse_choice = st.selectbox(
-                    "解析方式",
-                    ("规则解析（无需额外调用）", "模型 + 规则双轨（额外 API 调用）"),
-                    help="双轨解析会为每条回答额外调用一次抽取模型，成本更高。",
+        mode = st.radio("运行模式", ("mock", "live"), horizontal=True, key="run_mode")
+        offline = st.toggle(
+            "离线演示",
+            key="offline_demo",
+            help="直接读取内置案例，不调用任何 API",
+        )
+        engine_options = ("mock",) if mode == "mock" else ("deepseek", "doubao")
+        engine_name = st.selectbox("引擎", engine_options, key=f"engine_{mode}")
+
+        parse_choice = "规则解析"
+        if mode == "live" and not offline:
+            parse_choice = st.selectbox(
+                "解析方式",
+                ("规则解析（无需额外调用）", "模型 + 规则双轨（额外 API 调用）"),
+                help="双轨解析会为每条回答额外调用一次抽取模型，成本更高。",
+            )
+        if mode == "live" and not offline:
+            ensure_api_input_defaults()
+            with st.expander("API 设置", expanded=PUBLIC_BYOK):
+                st.text_input(
+                    "DeepSeek API Key",
+                    key=API_WIDGET_KEYS["DEEPSEEK_API_KEY"],
+                    type="password",
+                    on_change=mark_api_input_changed,
+                    help="仅用于当前会话，不建议填写企业主账号或高额度 Key。",
                 )
-            if mode == "live" and not offline:
-                ensure_api_input_defaults()
-                with st.expander("API 设置", expanded=False):
-                    st.text_input(
-                        "DeepSeek API Key",
-                        key=API_WIDGET_KEYS["DEEPSEEK_API_KEY"],
-                        type="password",
-                        on_change=mark_api_input_changed,
-                    )
-                    st.text_input(
-                        "豆包 API Key",
-                        key=API_WIDGET_KEYS["DOUBAO_API_KEY"],
-                        type="password",
-                        on_change=mark_api_input_changed,
-                    )
-                    st.text_input(
-                        "豆包接入点 ID",
-                        key=API_WIDGET_KEYS["DOUBAO_MODEL"],
-                        placeholder="ep- 开头",
-                        on_change=mark_api_input_changed,
-                    )
-                    if ENV_EDIT_ENABLED:
-                        st.button(
-                            "保存到本机",
-                            type="primary",
-                            width="stretch",
-                            on_click=save_api_settings,
-                        )
-                        st.button(
-                            "清除本机 API 配置",
-                            width="stretch",
-                            on_click=clear_saved_api_settings,
-                        )
-                    else:
-                        st.caption("公开部署模式：网页不会保存或清除服务器 .env。")
+                st.text_input(
+                    "豆包 API Key",
+                    key=API_WIDGET_KEYS["DOUBAO_API_KEY"],
+                    type="password",
+                    on_change=mark_api_input_changed,
+                    help="仅用于当前会话，不建议填写企业主账号或高额度 Key。",
+                )
+                st.text_input(
+                    "豆包接入点 ID",
+                    key=API_WIDGET_KEYS["DOUBAO_MODEL"],
+                    placeholder="ep- 开头",
+                    on_change=mark_api_input_changed,
+                    help="豆包真实调用需要 ep- 开头的推理接入点 ID。",
+                )
+                if ENV_EDIT_ENABLED:
                     st.button(
-                        "仅清除页面输入",
+                        "保存到本机",
+                        type="primary",
                         width="stretch",
-                        on_click=clear_page_api_settings,
+                        on_click=save_api_settings,
                     )
-
-                api_config = current_api_config()
-                st.session_state["api_config"] = api_config
-                deepseek_ready, doubao_ready = load_api_status(api_config)
-                current_ready = deepseek_ready if engine_name == "deepseek" else doubao_ready
-                st.caption(f"当前来源：{api_source_for(engine_name, api_config)}")
-                st.caption(f"当前状态：{'已填写' if current_ready else '未填写'}")
-                st.caption(
-                    f"平台检查：DeepSeek {'已填写' if deepseek_ready else '未填写'}；"
-                    f"豆包 {'已填写' if doubao_ready else '未填写'}"
+                    st.button(
+                        "清除本机 API 配置",
+                        width="stretch",
+                        on_click=clear_saved_api_settings,
+                    )
+                else:
+                    st.caption(
+                        "BYOK：不会保存到服务器；切换页面或会话结束后失效。"
+                        "调用请求会经本服务转发，请使用个人低额度 Key。"
+                    )
+                st.button(
+                    "清除本次 API 输入" if PUBLIC_BYOK else "仅清除页面输入",
+                    width="stretch",
+                    on_click=clear_page_api_settings,
                 )
-            if offline:
-                st.info("离线演示不读取 API Key，报告会自动标注“模拟数据”。")
+
+            api_config = current_api_config()
+            st.session_state["api_config"] = api_config
+            deepseek_ready, doubao_ready = load_api_status(api_config)
+            current_ready = deepseek_ready if engine_name == "deepseek" else doubao_ready
+            st.caption(f"当前来源：{api_source_for(engine_name, api_config)}")
+            st.caption(f"当前状态：{'已填写' if current_ready else '未填写'}")
+            st.caption(
+                f"平台检查：DeepSeek {'已填写' if deepseek_ready else '未填写'}；"
+                f"豆包 {'已填写' if doubao_ready else '未填写'}"
+            )
+            if PUBLIC_BYOK:
+                st.warning("真实调用费用由填写 Key 的用户承担；公网版最多允许 3 轮。")
+        if offline:
+            st.info("离线演示不读取 API Key，报告会自动标注“模拟数据”。")
 
         st.divider()
         st.header("品牌档案")
@@ -591,7 +604,7 @@ def render_sidebar() -> tuple[str, bool, str, str]:
                 help="填写品牌已运营或覆盖的网站、平台域名；不确定可以留空。",
             )
             st.caption("提示：品牌名必填；事实库建议至少填写 2 条。")
-            profile_save_label = "应用到当前演示" if PUBLIC_DEMO else "保存档案"
+            profile_save_label = "应用到当前会话" if PUBLIC_BYOK else "保存档案"
             save_clicked = st.form_submit_button(profile_save_label, width="stretch")
 
         st.button(
@@ -601,12 +614,12 @@ def render_sidebar() -> tuple[str, bool, str, str]:
             help="清空品牌档案、当前分析结果和自动恢复记录；不会删除历史采集记录。",
         )
         if saved:
-            if PUBLIC_DEMO:
-                st.caption(f"当前演示档案：{saved.brand_name}。刷新页面后自动清除。")
+            if PUBLIC_BYOK:
+                st.caption(f"当前会话档案：{saved.brand_name}。刷新页面后自动清除。")
             else:
                 st.caption(f"当前档案：{saved.brand_name}。刷新或重启后会恢复此档案。")
         else:
-            if PUBLIC_DEMO:
+            if PUBLIC_BYOK:
                 st.caption("档案只保留在当前浏览器会话，不会写入服务器。")
             else:
                 st.caption("保存档案后，下次打开会自动恢复；需要重新填写时可一键清空。")
@@ -633,7 +646,7 @@ def render_sidebar() -> tuple[str, bool, str, str]:
                 st.session_state.pop("analysis", None)
                 st.session_state.pop("records", None)
                 st.session_state["review_log"] = []
-                flash("品牌档案已应用到当前演示，可以开始体检。" if PUBLIC_DEMO else "品牌档案已保存，可以开始体检。")
+                flash("品牌档案已应用到当前会话，可以开始体检。" if PUBLIC_BYOK else "品牌档案已保存，可以开始体检。")
                 st.rerun()
 
     return mode, offline, engine_name, parse_choice
@@ -690,15 +703,16 @@ def execute_run(mode: str, engine_name: str, rounds: int, parse_choice: str) -> 
     covered = st.session_state.get("covered_domains", [])
     api_config = current_api_config() if mode == "live" else None
     try:
+        safe_rounds = max(1, min(int(rounds), 3)) if PUBLIC_BYOK else max(1, int(rounds))
         engine = get_engine(engine_name, mode, api_config=api_config)
-        total_calls = len(questions) * int(rounds)
+        total_calls = len(questions) * safe_rounds
         progress_engine = ProgressEngine(engine, total_calls)
         run_path = run_path_for(profile)
         new_records = run_batch(
             questions,
             progress_engine,
             profile,
-            rounds=int(rounds),
+            rounds=safe_rounds,
             engine_name=engine_name,
             path=str(run_path),
         )
@@ -751,7 +765,18 @@ def render_run_tab(mode: str, offline: bool, engine_name: str, parse_choice: str
             execute_offline()
         return
 
-    rounds = st.number_input("轮数", min_value=1, max_value=20, value=3, step=1)
+    max_rounds = 3 if PUBLIC_BYOK else 20
+    default_rounds = 1 if PUBLIC_BYOK else 3
+    rounds = st.number_input(
+        "轮数",
+        min_value=1,
+        max_value=max_rounds,
+        value=default_rounds,
+        step=1,
+        help="公网 BYOK 模式最多 3 轮，以减少误操作产生的 API 费用。" if PUBLIC_BYOK else None,
+    )
+    if mode == "live" and not offline:
+        st.caption("1 轮通常包含 40 次回答调用；模型 + 规则双轨还会增加解析调用。")
     if mode == "live" and parse_choice.startswith("模型"):
         st.warning("双轨解析会对每条回答额外调用一次抽取模型，请先用 1 轮做小规模验证。")
     if st.button("开始体检", type="primary", width="stretch"):
@@ -992,8 +1017,8 @@ def main() -> None:
     st.set_page_config(page_title="齐鲁品牌 AI 可见度体检", page_icon="🔎", layout="wide")
     st.title("齐鲁品牌 AI 可见度体检")
     st.caption("测量 AI 是否看见品牌、在什么位置看见，以及下一步应在哪些信源补位。")
-    if PUBLIC_DEMO:
-        st.caption("公网演示版 · 使用模拟数据 · 不保存个人输入 · 不调用付费 API")
+    if PUBLIC_BYOK:
+        st.caption("公网 BYOK 版 · Key 仅用于当前会话 · 不写入服务器 .env · 模拟模式不调用 API")
     load_last_profile()
 
     mode, offline, engine_name, parse_choice = render_sidebar()
