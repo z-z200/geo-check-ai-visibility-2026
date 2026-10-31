@@ -110,6 +110,29 @@ def empty_api_config() -> dict[str, str]:
     return {key: "" for key in API_ENV_KEYS}
 
 
+def api_widget_keys_for_current_form() -> dict[str, str]:
+    """为 API 输入控件生成版本化 key，确保清除后前端不会残留旧值。"""
+    try:
+        version = int(st.session_state.get("api_form_version", 0))
+    except (TypeError, ValueError):
+        version = 0
+    return {key: f"{base}_{version}" for key, base in API_WIDGET_KEYS.items()}
+
+
+def reset_api_inputs() -> None:
+    """丢弃当前版本 API 控件并切到一组全新的空输入框。"""
+    for widget_key in api_widget_keys_for_current_form().values():
+        st.session_state.pop(widget_key, None)
+    try:
+        version = int(st.session_state.get("api_form_version", 0))
+    except (TypeError, ValueError):
+        version = 0
+    st.session_state["api_form_version"] = version + 1
+    st.session_state["api_inputs_initialized"] = False
+    st.session_state[API_PAGE_OVERRIDE_KEY] = False
+    st.session_state["api_config"] = empty_api_config()
+
+
 def read_saved_api_config() -> dict[str, str]:
     """仅在允许编辑本机配置时读取 .env；公开部署不回填服务器密钥。"""
     config = empty_api_config()
@@ -129,7 +152,7 @@ def ensure_api_input_defaults() -> None:
     if st.session_state.get("api_inputs_initialized"):
         return
     defaults = read_saved_api_config()
-    for env_key, widget_key in API_WIDGET_KEYS.items():
+    for env_key, widget_key in api_widget_keys_for_current_form().items():
         if widget_key not in st.session_state:
             st.session_state[widget_key] = defaults[env_key]
     st.session_state.setdefault(API_PAGE_OVERRIDE_KEY, False)
@@ -140,7 +163,7 @@ def current_api_config() -> dict[str, str]:
     """读取当前页面输入，作为运行时最高优先级配置。"""
     return {
         key: str(st.session_state.get(widget_key, "") or "").strip()
-        for key, widget_key in API_WIDGET_KEYS.items()
+        for key, widget_key in api_widget_keys_for_current_form().items()
     }
 
 
@@ -205,7 +228,7 @@ def save_api_settings() -> None:
             os.environ[key] = value
         else:
             os.environ.pop(key, None)
-    for key, widget_key in API_WIDGET_KEYS.items():
+    for key, widget_key in api_widget_keys_for_current_form().items():
         st.session_state[widget_key] = values[key]
     st.session_state[API_PAGE_OVERRIDE_KEY] = True
     st.session_state["api_config"] = values
@@ -226,19 +249,14 @@ def clear_saved_api_settings() -> None:
 
     for key in API_ENV_KEYS:
         os.environ.pop(key, None)
-        st.session_state[API_WIDGET_KEYS[key]] = ""
-    st.session_state[API_PAGE_OVERRIDE_KEY] = False
-    st.session_state["api_config"] = empty_api_config()
+    reset_api_inputs()
     flash("已清除本机 API 配置，其他 .env 内容未修改。")
 
 
 def clear_page_api_settings() -> None:
     """只清空当前页面的 API 输入，不修改本机 .env。"""
-    for widget_key in API_WIDGET_KEYS.values():
-        st.session_state[widget_key] = ""
-    st.session_state[API_PAGE_OVERRIDE_KEY] = False
-    st.session_state["api_config"] = empty_api_config()
-    flash("已清除页面 API 输入；本机 .env 未修改。")
+    reset_api_inputs()
+    flash("已清除本次 API 输入；本机 .env 未修改。")
 
 
 def read_demo(path: Path = DEMO_PATH) -> tuple[BrandProfile, list[str], list[AnswerRecord]]:
@@ -483,24 +501,25 @@ def render_sidebar() -> tuple[str, bool, str, str]:
             )
         if mode == "live" and not offline:
             ensure_api_input_defaults()
+            api_keys = api_widget_keys_for_current_form()
             with st.expander("API 设置", expanded=PUBLIC_BYOK):
                 st.text_input(
                     "DeepSeek API Key",
-                    key=API_WIDGET_KEYS["DEEPSEEK_API_KEY"],
+                    key=api_keys["DEEPSEEK_API_KEY"],
                     type="password",
                     on_change=mark_api_input_changed,
                     help="仅用于当前会话，不建议填写企业主账号或高额度 Key。",
                 )
                 st.text_input(
                     "豆包 API Key",
-                    key=API_WIDGET_KEYS["DOUBAO_API_KEY"],
+                    key=api_keys["DOUBAO_API_KEY"],
                     type="password",
                     on_change=mark_api_input_changed,
                     help="仅用于当前会话，不建议填写企业主账号或高额度 Key。",
                 )
                 st.text_input(
                     "豆包接入点 ID",
-                    key=API_WIDGET_KEYS["DOUBAO_MODEL"],
+                    key=api_keys["DOUBAO_MODEL"],
                     placeholder="ep- 开头",
                     on_change=mark_api_input_changed,
                     help="豆包真实调用需要 ep- 开头的推理接入点 ID。",
