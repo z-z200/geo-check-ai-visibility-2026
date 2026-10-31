@@ -105,6 +105,110 @@ def show_flash() -> None:
     renderer(item.get("message", ""))
 
 
+def inject_ui_styles() -> None:
+    """统一侧边栏标题、隐私说明和控件间距。"""
+    st.markdown(
+        """
+        <style>
+        [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+            padding-top: 1.1rem;
+        }
+        .geo-sidebar-heading {
+            display: flex;
+            align-items: center;
+            gap: .65rem;
+            margin: .1rem 0 .9rem;
+            color: #17324d;
+            font-size: 1.2rem;
+            font-weight: 800;
+            letter-spacing: -.01em;
+        }
+        .geo-sidebar-heading::before {
+            content: "";
+            width: .32rem;
+            height: 1.35rem;
+            border-radius: 999px;
+            background: linear-gradient(180deg, #2563eb, #60a5fa);
+            box-shadow: 0 2px 8px rgba(37, 99, 235, .28);
+        }
+        .geo-byok-card {
+            position: relative;
+            overflow: hidden;
+            margin: .15rem 0 .95rem;
+            padding: .9rem .95rem .85rem 1.05rem;
+            border: 1px solid #d7e7fb;
+            border-radius: .95rem;
+            background:
+                radial-gradient(circle at 100% 0%, rgba(147, 197, 253, .34), transparent 42%),
+                linear-gradient(145deg, #fbfdff 0%, #eef6ff 100%);
+            box-shadow: 0 7px 20px rgba(37, 99, 235, .08);
+        }
+        .geo-byok-card::before {
+            content: "";
+            position: absolute;
+            top: .75rem;
+            bottom: .75rem;
+            left: 0;
+            width: .22rem;
+            border-radius: 0 999px 999px 0;
+            background: linear-gradient(180deg, #2563eb, #7dd3fc);
+        }
+        .geo-byok-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: .5rem;
+            margin-bottom: .55rem;
+            color: #15385f;
+            font-size: .88rem;
+            font-weight: 800;
+        }
+        .geo-byok-badge {
+            flex: 0 0 auto;
+            padding: .18rem .45rem;
+            border: 1px solid #bfdbfe;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, .8);
+            color: #2563eb;
+            font-size: .63rem;
+            font-weight: 700;
+            letter-spacing: .02em;
+        }
+        .geo-byok-line {
+            display: flex;
+            align-items: flex-start;
+            gap: .48rem;
+            margin-top: .3rem;
+            color: #48627d;
+            font-size: .76rem;
+            line-height: 1.45;
+        }
+        .geo-byok-dot {
+            flex: 0 0 auto;
+            width: .38rem;
+            height: .38rem;
+            margin-top: .31rem;
+            border-radius: 50%;
+            background: #60a5fa;
+            box-shadow: 0 0 0 3px rgba(96, 165, 250, .13);
+        }
+        [data-testid="stSidebar"] [data-testid="stExpander"] details {
+            border-color: #dbe7f3;
+            border-radius: .8rem;
+            background: rgba(255, 255, 255, .58);
+        }
+        [data-testid="stSidebar"] .stRadio > label,
+        [data-testid="stSidebar"] .stSelectbox > label,
+        [data-testid="stSidebar"] .stNumberInput > label {
+            color: #29445f;
+            font-weight: 650;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def empty_api_config() -> dict[str, str]:
     """返回字段完整的空 API 配置，避免 UI 和引擎读到缺失键。"""
     return {key: "" for key in API_ENV_KEYS}
@@ -476,11 +580,21 @@ def render_sidebar() -> tuple[str, bool, str, str]:
         form_version = 0
 
     with st.sidebar:
-        st.header("运行设置")
+        st.markdown('<div class="geo-sidebar-heading">运行设置</div>', unsafe_allow_html=True)
         if PUBLIC_BYOK:
-            st.info(
-                "公网 BYOK 模式：真实 API Key 只用于当前浏览器会话，不写入服务器 .env、"
-                "日志或报告；模拟和内置案例无需 Key。"
+            st.markdown(
+                """
+                <div class="geo-byok-card">
+                    <div class="geo-byok-head">
+                        <span>BYOK 隐私模式</span>
+                        <span class="geo-byok-badge">会话隔离</span>
+                    </div>
+                    <div class="geo-byok-line"><span class="geo-byok-dot"></span><span>使用你自己的 API Key</span></div>
+                    <div class="geo-byok-line"><span class="geo-byok-dot"></span><span>仅用于当前会话，支持一键清除</span></div>
+                    <div class="geo-byok-line"><span class="geo-byok-dot"></span><span>不写入 .env、日志或报告</span></div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
 
         mode = st.radio("运行模式", ("mock", "live"), horizontal=True, key="run_mode")
@@ -538,8 +652,8 @@ def render_sidebar() -> tuple[str, bool, str, str]:
                     )
                 else:
                     st.caption(
-                        "BYOK：不会保存到服务器；切换页面或会话结束后失效。"
-                        "调用请求会经本服务转发，请使用个人低额度 Key。"
+                        "仅当前会话使用，请求会经本服务转发；"
+                        "点击下方按钮可立即清除。"
                     )
                 st.button(
                     "清除本次 API 输入" if PUBLIC_BYOK else "仅清除页面输入",
@@ -1034,6 +1148,7 @@ def render_review_tab() -> None:
 
 def main() -> None:
     st.set_page_config(page_title="齐鲁品牌 AI 可见度体检", page_icon="🔎", layout="wide")
+    inject_ui_styles()
     st.title("齐鲁品牌 AI 可见度体检")
     st.caption("测量 AI 是否看见品牌、在什么位置看见，以及下一步应在哪些信源补位。")
     if PUBLIC_BYOK:
