@@ -1,4 +1,7 @@
-"""公网 BYOK 入口：用户自带 API Key，仅用于当前会话。"""
+"""公网 BYOK 入口：用户自带 API Key，仅用于当前会话。
+
+Cache revision: 2026-10-31-ai-question-rewrite
+"""
 
 import os
 import runpy
