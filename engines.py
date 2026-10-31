@@ -210,17 +210,6 @@ if __name__ == "__main__":
         print(f"{i + 1}. {engine.ask('测试问题')[:60]}")
 
 
-ANSWER_SYSTEM_PROMPT = """你是一个面向普通用户的中文AI助手。请直接从用户做选择、比较或避坑的实际需要出发，回答用户的问题。
-
-要求：
-1. 像正常对话一样给出自然、具体的回答，不要写成品牌研究报告。
-2. 如果用户询问推荐、排名或“哪家更好”，请给出具体候选及理由；信息不足时可以说明不确定，但不要只用抽象标准回避问题。
-3. 可以根据回答内容自然表达推荐、认可、保留意见或负面评价，不要刻意保持中立，也不要强行褒贬。
-4. 不要编造具体价格、销量、奖项、资质、地址、引用或链接；无法确认的信息用自然语言说明。
-5. 不要提及测试、评测、GEO、品牌可见度、提示词等内部信息。
-6. 对所有品牌使用一致标准，不因品牌知名度或商业关系给予特殊照顾。
-"""
-
 PARSER_SYSTEM_PROMPT = """你是严谨的品牌可见度标注员。请只依据用户问题、AI回答和给定品牌档案进行分析，不补充外部知识，不猜测回答中没有出现的信息。
 
 对每一个被提及的品牌，分别判断：
@@ -286,16 +275,15 @@ class OpenAICompatEngine(BaseEngine):
             self._init_error = f"[ERROR] {type(exc).__name__}: {exc}"
 
     def _request(self, question: str) -> str:
-        """执行一次模型请求；可重试异常交由 call_with_retry 处理。"""
-        # 未提供自定义提示词时，默认使用普通 AI 助手回答人格。
-        system_content = self.system_prompt or ANSWER_SYSTEM_PROMPT
+        """执行一次模型请求；回答模式不附加自定义系统提示词。"""
+        messages = []
+        if self.system_prompt.strip():
+            messages.append({"role": "system", "content": self.system_prompt})
+        messages.append({"role": "user", "content": question})
         response = self.client.chat.completions.create(
             model=self.model,
             temperature=self.temperature,
-            messages=[
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": question},
-            ],
+            messages=messages,
         )
         return response.choices[0].message.content or ""
 

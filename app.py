@@ -26,7 +26,7 @@ if "GEO_ALLOW_ENV_EDIT" not in os.environ:
 from analysis import analyze_records
 from engines import BaseEngine, PARSER_SYSTEM_PROMPT, get_engine, load_records, run_batch
 from models import AnswerRecord, BrandProfile
-from question_gen import generate_questions
+from question_gen import QUESTION_GENERATOR_VERSION, generate_questions, generate_questions_with_ai
 from report import export_metrics_csv, export_suggestions_csv, render_html_report
 
 DEMO_PATH = Path("data/demo_results.json")
@@ -63,6 +63,7 @@ CURRENT_ANALYSIS_KEYS = (
     "analysis",
     "records",
     "engine_label",
+    "question_source",
     "review_log",
 )
 
@@ -387,8 +388,47 @@ def read_demo(path: Path = DEMO_PATH) -> tuple[BrandProfile, list[str], list[Ans
 
 
 def questions_for(profile: BrandProfile):
-    """统一生成问题，保证问题编号和类别在所有模式下一致。"""
+    """生成固定问题意图，供 Mock、离线演示和 Live 回退使用。"""
     return generate_questions(profile)
+
+
+def live_question_cache_key(profile: BrandProfile) -> str:
+    """问题只依赖用户决策结构字段，不读取事实库和已覆盖信源。"""
+    payload = {
+        "brand_name": profile.brand_name.strip(),
+        "category": profile.category.strip(),
+        "region": profile.region.strip(),
+        "city": profile.city.strip(),
+        "competitors": [item.strip() for item in profile.competitors if item.strip()],
+        "generator_version": QUESTION_GENERATOR_VERSION,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def live_questions_for(profile: BrandProfile, engine_name: str, api_config: dict[str, str]) -> tuple[list, str]:
+    """固定意图 + AI 改写 + 规则校验；失败时回退固定模板。"""
+    cache = st.session_state.setdefault("live_question_cache", {})
+    cache_key = live_question_cache_key(profile)
+    if cache_key in cache:
+        entry = cache[cache_key]
+        return entry["questions"], entry["source"]
+
+    seeds = questions_for(profile)
+    try:
+        generation_engine = get_engine(engine_name, "live", api_config=api_config)
+        with st.spinner("正在结合品牌信息生成并校验问题…"):
+            questions = generate_questions_with_ai(profile, generation_engine)
+        engine_display = {"deepseek": "DeepSeek", "doubao": "豆包"}.get(engine_name, engine_name)
+        source = f"AI 改写 · {engine_display}"
+    except Exception as exc:
+        questions = seeds
+        source = f"固定模板 · AI 生成未通过校验（{type(exc).__name__}）"
+
+    cache[cache_key] = {"questions": questions, "source": source}
+    st.session_state["live_question_cache"] = cache
+    return questions, source
 
 
 def load_last_profile() -> None:
@@ -438,6 +478,7 @@ def clear_profile_inputs() -> None:
     st.session_state.pop("skip_last_profile_restore", None)
     for key in (*profile_input_keys(version), *CURRENT_ANALYSIS_KEYS):
         st.session_state.pop(key, None)
+    st.session_state.pop("live_question_cache", None)
     st.session_state["profile_form_version"] = version + 1
     if not PUBLIC_BYOK:
         try:
@@ -541,6 +582,7 @@ def load_demo_into_session() -> None:
         covered_domains=covered,
         is_mock=True,
     )
+    st.session_state["question_source"] = "固定模板 · 离线演示"
     store_analysis(result, profile, covered, questions, "离线演示")
 
 
@@ -597,14 +639,25 @@ def render_sidebar() -> tuple[str, bool, str, str]:
                 unsafe_allow_html=True,
             )
 
-        mode = st.radio("运行模式", ("mock", "live"), horizontal=True, key="run_mode")
+        mode = st.radio(
+            "运行模式",
+            ("mock", "live"),
+            horizontal=True,
+            key="run_mode",
+            format_func=lambda value: "模拟测试" if value == "mock" else "真实 API",
+        )
         offline = st.toggle(
             "离线演示",
             key="offline_demo",
             help="直接读取内置案例，不调用任何 API",
         )
         engine_options = ("mock",) if mode == "mock" else ("deepseek", "doubao")
-        engine_name = st.selectbox("引擎", engine_options, key=f"engine_{mode}")
+        engine_name = st.selectbox(
+            "引擎",
+            engine_options,
+            key=f"engine_{mode}",
+            format_func=lambda value: {"mock": "模拟引擎", "deepseek": "DeepSeek", "doubao": "豆包"}[value],
+        )
 
         parse_choice = "规则解析"
         if mode == "live" and not offline:
@@ -778,6 +831,9 @@ def render_sidebar() -> tuple[str, bool, str, str]:
                 save_last_profile(profile, covered_domains)
                 st.session_state.pop("analysis", None)
                 st.session_state.pop("records", None)
+                st.session_state.pop("questions", None)
+                st.session_state.pop("question_source", None)
+                st.session_state.pop("live_question_cache", None)
                 st.session_state["review_log"] = []
                 flash("品牌档案已应用到当前会话，可以开始体检。" if PUBLIC_BYOK else "品牌档案已保存，可以开始体检。")
                 st.rerun()
@@ -787,8 +843,12 @@ def render_sidebar() -> tuple[str, bool, str, str]:
 
 def render_status(mode: str, offline: bool, engine_name: str) -> None:
     records = st.session_state.get("records", [])
-    label = "离线演示" if offline else engine_name
-    st.caption(f"当前模式：{mode.upper()}　|　当前引擎：{label}　|　已分析：{len(records)} 条")
+    mode_label = "离线演示" if offline else ("模拟测试" if mode == "mock" else "真实 API")
+    engine_label = {"mock": "模拟引擎", "deepseek": "DeepSeek", "doubao": "豆包"}.get(engine_name, engine_name)
+    label = "离线案例" if offline else engine_label
+    question_source = st.session_state.get("question_source")
+    suffix = f"　|　问题：{question_source}" if question_source else ""
+    st.caption(f"当前模式：{mode_label}　|　当前引擎：{label}　|　已分析：{len(records)} 条{suffix}")
 
 
 def render_input_tab() -> None:
@@ -807,9 +867,13 @@ def render_input_tab() -> None:
     if len(profile.facts) < 2:
         st.warning("事实库少于 2 条时，补位建议会因缺少可核验事实而无法生成。")
 
-    questions = questions_for(profile)
+    questions = st.session_state.get("questions") or questions_for(profile)
     st.subheader(f"体检问题：{len(questions)} 条")
-    st.caption("问题按品牌词、品类词、场景词、竞品词、地域词、决策长尾词和风险词分组。")
+    question_source = st.session_state.get("question_source")
+    if question_source:
+        st.caption(f"问题来源：{question_source}。按品牌词、品类词、场景词、竞品词、地域词、决策长尾词和风险词分组。")
+    else:
+        st.caption("当前显示固定问题意图预览；真实 API 模式会在运行时结合品牌结构信息改写并做规则校验，事实库不参与。")
     st.dataframe(
         pd.DataFrame([{"qid": q.qid, "类别": q.category, "问题": q.text} for q in questions]),
         width="stretch",
@@ -832,11 +896,14 @@ def execute_run(mode: str, engine_name: str, rounds: int, parse_choice: str) -> 
         st.warning("请先在左侧保存品牌档案。")
         return
 
-    questions = questions_for(profile)
     covered = st.session_state.get("covered_domains", [])
     api_config = current_api_config() if mode == "live" else None
+    questions = questions_for(profile)
+    question_source = "固定模板 · 模拟测试"
     try:
         safe_rounds = max(1, min(int(rounds), 3)) if PUBLIC_BYOK else max(1, int(rounds))
+        if mode == "live":
+            questions, question_source = live_questions_for(profile, engine_name, api_config or {})
         engine = get_engine(engine_name, mode, api_config=api_config)
         total_calls = len(questions) * safe_rounds
         progress_engine = ProgressEngine(engine, total_calls)
@@ -876,12 +943,22 @@ def execute_run(mode: str, engine_name: str, rounds: int, parse_choice: str) -> 
             is_mock=(mode == "mock"),
             progress_callback=update_parse,
         )
+        st.session_state["question_source"] = question_source
         store_analysis(result, profile, covered, questions, engine_name)
         failed = result["metrics"].get("failed_records", 0)
         if failed:
-            flash(f"本次新增 {len(new_records)} 条；累计 {len(raw_records)} 条，其中 {failed} 条 API 调用失败，已进入复核。", "warning")
+            flash(
+                f"本次新增 {len(new_records)} 条；累计 {len(raw_records)} 条，其中 {failed} 条 API 调用失败，已进入复核。"
+                f"问题来源：{question_source}。",
+                "warning",
+            )
         else:
-            flash(f"体检完成：本次新增 {len(new_records)} 条，累计分析 {len(raw_records)} 条。")
+            level = "warning" if "未通过校验" in question_source else "success"
+            flash(
+                f"体检完成：本次新增 {len(new_records)} 条，累计分析 {len(raw_records)} 条。"
+                f"问题来源：{question_source}。",
+                level,
+            )
         st.rerun()
     except ValueError as exc:
         st.error(f"配置错误：{exc}")
@@ -909,7 +986,7 @@ def render_run_tab(mode: str, offline: bool, engine_name: str, parse_choice: str
         help="公网 BYOK 模式最多 3 轮，以减少误操作产生的 API 费用。" if PUBLIC_BYOK else None,
     )
     if mode == "live" and not offline:
-        st.caption("1 轮通常包含 40 次回答调用；模型 + 规则双轨还会增加解析调用。")
+        st.caption("真实模式会额外调用 1 次 AI 改写并校验 40 条问题；1 轮回答通常包含 40 次调用，双轨解析还会增加调用。")
     if mode == "live" and parse_choice.startswith("模型"):
         st.warning("双轨解析会对每条回答额外调用一次抽取模型，请先用 1 轮做小规模验证。")
     if st.button("开始体检", type="primary", width="stretch"):
